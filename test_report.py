@@ -136,7 +136,7 @@ def test_full_report(tmp_path, monkeypatch):
     assert "조회수 적은 영상" not in text               # min_views 필터
     assert "오래된 인기 영상" not in text               # 기간 필터
     assert "연봉 4천 실수령액 공개" in text.split("### 쇼츠")[1]  # 45초 → 쇼츠
-    assert "65.0배" in text                            # 520,000 / 8,000
+    assert "65.0배" in text                            # 520,000 / 8,000 (8천 ≥ 1천)
     assert "연말정산" in text.split("오늘 노려볼 주제 후보")[1].split("## 1.")[0]
 
 
@@ -165,3 +165,48 @@ if __name__ == "__main__":
     path.unlink()
     (out / "latest.md").unlink()
     print(f"샘플 리포트: {sample}")
+
+
+# ---- 유튜브 검색(구글 트렌드 YouTube 검색) ----
+class FakeGT:
+    """explore/widget 응답을 흉내 냄. 키워드별로 정해 둔 시계열을 돌려줌"""
+    SERIES = {"연봉": [10] * 28, "연말정산": [2] * 14 + [6] * 14, "이직": [8] * 28, "AI 직업": [1] * 14 + [2] * 14,
+              "퇴사": [20] * 14 + [10] * 14}
+
+    def explore(self, keywords, timeframe):
+        ws = [{"id": "TIMESERIES", "request": {"kw": keywords}, "token": "t"}]
+        for i, k in enumerate(keywords):
+            ws.append({"id": f"RELATED_QUERIES_{i}", "token": "r",
+                       "request": {"restriction": {"complexKeywordsRestriction": {"keyword": [{"value": k}]}}}})
+        return ws
+
+    def widget(self, w, kind):
+        if kind == "multiline":
+            kws = w["request"]["kw"]
+            return {"default": {"timelineData": [{"value": [self.SERIES[k][i] for k in kws]} for i in range(28)]}}
+        kw = w["request"]["restriction"]["complexKeywordsRestriction"]["keyword"][0]["value"]
+        return {"default": {"rankedList": [{"rankedKeyword": [{"query": kw + " 인기", "formattedValue": "100"}]},
+                                           {"rankedKeyword": [{"query": "2026 " + kw, "formattedValue": "+2,400%"}]}]}}
+
+
+def test_yt_search():
+    cfg = {"anchor": "연봉", "keywords": ["연봉", "연말정산", "이직", "AI 직업", "퇴사"], "compare_days": 14}
+    out = tr.collect_yt_search(cfg, client=FakeGT())
+    rows = {r["name"]: r for r in out["rows"]}
+    assert set(rows) == {"연말정산", "이직", "AI 직업", "퇴사"}
+    assert round(rows["연말정산"]["change"]) == 200 and round(rows["연말정산"]["level"]) == 60
+    assert round(rows["퇴사"]["change"]) == -50
+    assert rows["연말정산"]["related"] == ["2026 연말정산(+2,400%)"]
+    assert out["rows"][0]["name"] == "연말정산"  # 가장 많이 오른 순
+    md = tr.render_report(NOW, {"items": []}, {"rows": []}, {"rows": []}, out)
+    assert "## 4. 유튜브 검색 추이" in md and "2026 연말정산(+2,400%)" in md and "유튜브 검색 상승: 연말정산(+200%)" in md
+
+
+def test_yt_search_blocked():
+    class Blocked:
+        def explore(self, *a):
+            raise RuntimeError("429")
+    out = tr.collect_yt_search({"anchor": "연봉", "keywords": ["연봉", "연말정산"]}, client=Blocked())
+    assert out["rows"] == [] and out["warnings"]
+    md = tr.render_report(NOW, {"items": []}, {"rows": []}, {"rows": []}, out)
+    assert "데이터가 없어요" in md
