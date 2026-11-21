@@ -4,7 +4,7 @@
 매일 세 가지 데이터를 모아 마크다운 리포트를 만듭니다.
   1. 구글 트렌드 한국 급상승 검색어 (키 필요 없음)
   2. 유튜브 최근 영상 중 구독자 대비 조회수가 높은 '아웃라이어' (YOUTUBE_API_KEY 필요)
-  3. 네이버 데이터랩 키워드 검색량 추이 (NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 필요)
+  3. 네이버 검색어 트렌드(NAVER API HUB) 검색량 추이 (NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 필요)
 
 키가 없는 항목은 건너뛰고 나머지만으로 리포트를 만듭니다.
 
@@ -30,7 +30,7 @@ import yaml
 
 KST = dt.timezone(dt.timedelta(hours=9))
 YT_BASE = "https://www.googleapis.com/youtube/v3"
-NAVER_URL = "https://openapi.naver.com/v1/datalab/search"
+NAVER_URL = "https://naverapihub.apigw.ntruss.com/search-trend/v1/search"  # NAVER API HUB (2026년 6월~)
 TRENDS_URL = "https://trends.google.com/trending/rss?geo={geo}"
 WEEKDAYS = "월화수목금토일"
 
@@ -120,11 +120,16 @@ def fetch_google_trends(geo: str) -> list[dict]:
 
 
 def mark_relevance(items: list[dict], words: list[str]) -> list[dict]:
-    lowered = [w.lower() for w in words]
+    # 영문 단어(AI, ETF 등)는 단어 경계로만 매칭해서 'lpga' 같은 오탐을 막음
+    patterns = []
+    for w in words:
+        if re.fullmatch(r"[A-Za-z0-9]+", w):
+            patterns.append((w, re.compile(rf"(?<![A-Za-z0-9]){re.escape(w)}(?![A-Za-z0-9])", re.I)))
+        else:
+            patterns.append((w, re.compile(re.escape(w))))
     for it in items:
-        haystack = " ".join([it["title"]] + [n.get("title", "") for n in it["news"]]).lower()
-        hits = [w for w, lw in zip(words, lowered) if lw in haystack]
-        it["relevant_words"] = hits
+        haystack = " ".join([it["title"]] + [n.get("title", "") for n in it["news"]])
+        it["relevant_words"] = [w for w, pat in patterns if pat.search(haystack)]
     return items
 
 
@@ -184,7 +189,8 @@ def parse_duration(iso: str) -> int:
     return d * 86400 + h * 3600 + mi * 60 + s
 
 
-def build_video_rows(videos: dict, channels: dict, sources: dict, now: dt.datetime, min_views: int) -> list[dict]:
+def build_video_rows(videos: dict, channels: dict, sources: dict, now: dt.datetime, min_views: int,
+                     ratio_floor: int = 1000) -> list[dict]:
     rows = []
     for vid, v in videos.items():
         stats = v.get("statistics", {})
@@ -207,7 +213,7 @@ def build_video_rows(videos: dict, channels: dict, sources: dict, now: dt.dateti
             "likes": int(stats["likeCount"]) if "likeCount" in stats else None,
             "comments": int(stats["commentCount"]) if "commentCount" in stats else None,
             "subs": subs,
-            "ratio": (views / max(subs, 1)) if subs else None,
+            "ratio": (views / max(subs, ratio_floor)) if subs is not None else None,  # 신생 채널 과대평가 방지
             "views_per_day": views / age_days,
             "age_days": age_days,
             "duration": duration,
@@ -249,7 +255,8 @@ def collect_youtube(cfg: dict, api_key: str, now: dt.datetime) -> dict:
               if dt.datetime.fromisoformat(v["snippet"]["publishedAt"].replace("Z", "+00:00")) >= since}
     channel_ids = sorted({v["snippet"]["channelId"] for v in videos.values()})
     channels = yt.channels(channel_ids) if channel_ids else {}
-    rows = build_video_rows(videos, channels, sources, now, cfg.get("min_views", 10000))
+    rows = build_video_rows(videos, channels, sources, now, cfg.get("min_views", 10000),
+                            cfg.get("ratio_floor_subs", 1000))
     return {"rows": rows, "units_used": yt.units_used, "warnings": warnings}
 
 
@@ -296,11 +303,11 @@ def naver_request(client_id, client_secret, start, end, groups: list[dict]) -> l
         "keywordGroups": [{"groupName": g["name"], "keywords": g["keywords"][:20]} for g in groups],
     }
     resp = requests.post(NAVER_URL, data=json.dumps(body), timeout=30, headers={
-        "X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret,
+        "X-NCP-APIGW-API-KEY-ID": client_id, "X-NCP-APIGW-API-KEY": client_secret,
         "Content-Type": "application/json",
     })
     if resp.status_code != 200:
-        raise RuntimeError(f"네이버 데이터랩 오류 {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"네이버 API HUB 오류 {resp.status_code}: {resp.text[:300]}")
     return resp.json().get("results", [])
 
 
@@ -462,7 +469,7 @@ def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict) ->
     if youtube.get("skipped"):
         L.append(f"> 건너뜀: {youtube['skipped']}")
     else:
-        L.append("배수 = 조회수 ÷ 채널 구독자 수. 구독자보다 훨씬 많이 본 영상일수록 주제·제목·썸네일이 먹힌 거예요.")
+        L.append("배수 = 조회수 ÷ 채널 구독자 수(1천 명 미만 채널은 1천으로 계산). 높을수록 채널 힘이 아니라 주제·제목·썸네일이 먹힌 영상이에요.")
         L.append("")
         rows = youtube.get("rows", [])
         top_n = youtube.get("top_n", 15)
@@ -514,7 +521,7 @@ def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict) ->
         L.append("")
 
     L.append("---")
-    L.append("데이터: Google Trends 급상승 RSS · YouTube Data API v3 · 네이버 데이터랩 검색어트렌드")
+    L.append("데이터: Google Trends 급상승 RSS · YouTube Data API v3 · NAVER API HUB 검색어 트렌드")
     return "\n".join(L) + "\n"
 
 
