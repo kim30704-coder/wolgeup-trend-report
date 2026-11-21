@@ -101,6 +101,16 @@ naver:
     - {name: 퇴사·이직 연말정산, keywords: [중도퇴사 연말정산, 퇴사 연말정산, 이직 연말정산, 중도퇴사자 연말정산]}
     - {name: 신혼·맞벌이 생활비, keywords: [신혼부부 생활비, 신혼 생활비, 맞벌이 생활비, 부부 생활비]}
 
+# 유튜브 검색 추이 (구글 트렌드 'YouTube 검색' 필터). 키 필요 없음. 비공식이라 막히는 날은 이 항목만 비어요.
+youtube_search:
+  enabled: true
+  geo: KR
+  timeframe: today 3-m   # 최근 3개월 일별
+  compare_days: 14
+  anchor: 연봉           # 기준 키워드(유튜브에서 꾸준히 검색되는 말). 다른 키워드를 이 값 대비로 환산
+  related_top: 3         # 키워드마다 같이 급상승한 검색어 몇 개 보여줄지
+  related_max: 12        # 관련 검색어를 가져올 키워드 수 상한(요청 수 줄이기)
+  keywords: [연봉, 연말정산, 재테크, 주식, 미국 ETF, 부업, 스마트스토어, 청약, 이직, 퇴사, 생활비, 자격증, AI 직업, AI 자격증, 유튜브 수익, 비트코인]
 
 report:
   out_dir: reports

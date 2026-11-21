@@ -6,7 +6,7 @@
 |---|---|---|
 | 구글 트렌드 급상승 검색어 (한국) | 오늘 사람들이 갑자기 많이 찾는 단어, 그중 채널과 관련된 것 표시 | 없음 |
 | 유튜브 아웃라이어 (최근 7일) | 구독자 수보다 훨씬 많이 조회된 영상 = 주제·제목·썸네일이 먹힌 영상. 제목 패턴도 분석 | YouTube API 키 |
-| 네이버 데이터랩 검색량 | 연말정산·청약·AI 일자리 같은 키워드의 검색량이 오르는지 내리는지 | 네이버 Client ID/Secret |
+| 네이버 검색어 트렌드 (API HUB) | 연말정산·청약·AI 일자리 같은 키워드의 검색량이 오르는지 내리는지 | 네이버 Client ID/Secret |
 
 그리고 세 데이터를 엮어서 **"검색량이 오르는데 실제로 터진 영상도 있는 주제"**를 맨 위에 뽑아 줘요. 예시는 `sample/sample_report.md`를 보세요(가짜 데이터예요).
 
@@ -25,12 +25,16 @@
 
 무료 할당량은 하루 10,000이고, 기본 설정은 하루 약 1,400만 써요. 결제 정보는 필요 없어요.
 
-### 네이버 데이터랩 키
-1. https://developers.naver.com 접속 → 로그인
-2. **Application → 애플리케이션 등록**
-3. 사용 API에서 **데이터랩(검색어트렌드)** 선택
-4. 환경은 **WEB 설정**을 고르고 URL에 `http://localhost` 입력
-5. 등록 후 나오는 **Client ID**와 **Client Secret** 복사
+### 네이버 검색어 트렌드 키 (NAVER API HUB)
+2026년부터 데이터랩 API는 네이버 개발자센터가 아니라 **네이버 클라우드 플랫폼의 NAVER API HUB**에서 받아요. (현재 한시적 무료)
+1. https://www.ncloud.com 접속 → 오른쪽 위 **회원가입**(네이버 아이디로 가입 가능) → 로그인
+2. 오른쪽 위 **콘솔** 클릭
+3. 콘솔 오른쪽 위 **리전 & 플랫폼**에서 **한국 / VPC** 선택 → 적용
+4. 왼쪽 위 **메뉴(☰) → Services → Application Services → NAVER API HUB**
+5. 처음이면 **이용 신청** → 동의
+6. 왼쪽 **Application** → **Application 등록**
+7. 사용할 API에서 **검색어 트렌드**(Data Lab) 체크 → 다음 → 이름(예: `wolgeup-trend`) 입력 → 완료
+8. Application 목록에서 방금 만든 것 선택 → **인증 정보** → **Client ID**와 **Client Secret** 복사
 
 ---
 
@@ -91,3 +95,8 @@ pip install pytest
 pytest -q                     # 가짜 데이터로 전체 흐름 검사
 python tests/test_report.py   # sample/sample_report.md 다시 만들기
 ```
+
+## 유튜브 검색 추이 (리포트 4번 항목)
+- 구글 트렌드의 'YouTube 검색' 필터 데이터를 가져와요. **키가 필요 없어요.**
+- `config.yaml`의 `youtube_search.keywords`에 보고 싶은 단어를 넣으면 돼요. 기준 키워드(`anchor`, 기본 '연봉') 평균을 100으로 환산해요.
+- 공식 API가 아니라서 구글이 막는 날(429)은 이 항목만 비고, 나머지 리포트는 그대로 나와요.

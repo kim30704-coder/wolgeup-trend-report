@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""월급실험실 트렌드 리포트
+"""돈케미 트렌드 리포트
 
-매일 세 가지 데이터를 모아 마크다운 리포트를 만듭니다.
+매일 네 가지 데이터를 모아 마크다운 리포트를 만듭니다.
   1. 구글 트렌드 한국 급상승 검색어 (키 필요 없음)
   2. 유튜브 최근 영상 중 구독자 대비 조회수가 높은 '아웃라이어' (YOUTUBE_API_KEY 필요)
   3. 네이버 검색어 트렌드(NAVER API HUB) 검색량 추이 (NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 필요)
+  4. 유튜브 검색 추이 — 구글 트렌드의 'YouTube 검색' 필터 (키 필요 없음, 비공식이라 막히는 날은 건너뜀)
 
 키가 없는 항목은 건너뛰고 나머지만으로 리포트를 만듭니다.
 
@@ -33,6 +34,8 @@ YT_BASE = "https://www.googleapis.com/youtube/v3"
 NAVER_URL = "https://naverapihub.apigw.ntruss.com/search-trend/v1/search"  # NAVER API HUB (2026년 6월~)
 TRENDS_URL = "https://trends.google.com/trending/rss?geo={geo}"
 WEEKDAYS = "월화수목금토일"
+GT_BASE = "https://trends.google.com/trends/api"
+GT_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +394,129 @@ def signal(change: float) -> str:
 # 리포트
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 4. 유튜브 검색 추이 (구글 트렌드 'YouTube 검색', 비공식 엔드포인트)
+# ---------------------------------------------------------------------------
+
+def _gt_json(text: str) -> dict:
+    """구글 트렌드 응답 앞의 )]}' 방어 문자열을 떼고 JSON으로 읽음"""
+    return json.loads(text[text.index("{"):])
+
+
+class GTrends:
+    """구글 트렌드 탐색 API를 최소한으로 호출 (쿠키 → explore → widgetdata)"""
+
+    def __init__(self, geo="KR", hl="ko", tz=-540, session=None, pause=1.5):
+        import time
+        self.geo, self.hl, self.tz, self.pause, self._sleep = geo, hl, tz, pause, time.sleep
+        self.s = session or requests.Session()
+        self.s.headers.update(GT_UA)
+        self._warmed = False
+
+    def _get(self, url, params):
+        if not self._warmed:
+            try:
+                self.s.get("https://trends.google.com/trends/explore", params={"geo": self.geo, "hl": self.hl}, timeout=20)
+            except requests.RequestException:
+                pass
+            self._warmed = True
+        for attempt in range(3):
+            r = self.s.get(url, params=params, timeout=30)
+            if r.status_code == 429:  # 너무 자주 부르면 막힘 → 잠깐 쉬고 재시도
+                self._sleep(self.pause * (attempt + 2) * 4)
+                continue
+            r.raise_for_status()
+            self._sleep(self.pause)
+            return _gt_json(r.text)
+        raise RuntimeError("구글 트렌드가 요청을 막았어요(429)")
+
+    def explore(self, keywords: list[str], timeframe: str) -> list[dict]:
+        req = {"comparisonItem": [{"keyword": k, "geo": self.geo, "time": timeframe} for k in keywords],
+               "category": 0, "property": "youtube"}
+        data = self._get(f"{GT_BASE}/explore", {"hl": self.hl, "tz": self.tz, "req": json.dumps(req, ensure_ascii=False)})
+        return data["widgets"]
+
+    def widget(self, w: dict, kind: str) -> dict:
+        return self._get(f"{GT_BASE}/widgetdata/{kind}",
+                         {"hl": self.hl, "tz": self.tz, "req": json.dumps(w["request"], ensure_ascii=False), "token": w["token"]})
+
+
+def parse_multiline(data: dict, n: int) -> list[list[float]]:
+    """시간대별 값 → 키워드별 시계열 리스트"""
+    series = [[] for _ in range(n)]
+    for point in data.get("default", {}).get("timelineData", []):
+        for i, v in enumerate(point.get("value", [])[:n]):
+            series[i].append(float(v))
+    return series
+
+
+def parse_related(data: dict, top: int = 3) -> list[str]:
+    """관련 검색어 중 '급상승' 목록 상위 N개 (없으면 인기 목록)"""
+    lists = data.get("default", {}).get("rankedList", [])
+    rising = lists[1]["rankedKeyword"] if len(lists) > 1 else []
+    pool = rising or (lists[0]["rankedKeyword"] if lists else [])
+    return [f"{x['query']}({x.get('formattedValue', '')})" for x in pool[:top]]
+
+
+def _widget_keyword(w: dict) -> str | None:
+    try:
+        return w["request"]["restriction"]["complexKeywordsRestriction"]["keyword"][0]["value"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def summarize_yt_search(raw: dict[str, list[float]], anchor: str, compare_n: int) -> list[dict]:
+    rows = []
+    for name, vals in raw.items():
+        if name == anchor or not vals:
+            continue
+        n = min(compare_n, len(vals) // 2) or 1
+        recent, prev = vals[-n:], vals[-2 * n:-n] or vals[:n]
+        r_avg, p_avg = statistics.mean(recent), statistics.mean(prev)
+        change = (r_avg - p_avg) / p_avg * 100 if p_avg else (100.0 if r_avg else 0.0)
+        rows.append({"name": name, "change": change, "level": r_avg, "peak": max(vals),
+                     "spark": sparkline(vals[-28:])})
+    rows.sort(key=lambda r: r["change"], reverse=True)
+    return rows
+
+
+def collect_yt_search(cfg: dict, client: GTrends | None = None) -> dict:
+    """키워드를 기준 키워드와 4개씩 묶어 비교 → 기준 키워드 평균을 100으로 환산"""
+    keywords = cfg.get("keywords", [])
+    anchor = cfg.get("anchor", keywords[0] if keywords else "")
+    timeframe = cfg.get("timeframe", "today 3-m")
+    related_top = cfg.get("related_top", 3)
+    client = client or GTrends(geo=cfg.get("geo", "KR"))
+    raw: dict[str, list[float]] = {}
+    related: dict[str, list[str]] = {}
+    warnings = []
+    others = [k for k in keywords if k != anchor]
+    for batch in chunks(others, 4):
+        kws = [anchor] + list(batch)
+        try:
+            widgets = client.explore(kws, timeframe)
+            ts = next(w for w in widgets if w["id"].startswith("TIMESERIES"))
+            series = parse_multiline(client.widget(ts, "multiline"), len(kws))
+            base = statistics.mean(series[0]) if series[0] else 0
+            for k, vals in zip(kws, series):
+                raw[k] = [v / base * 100 for v in vals] if base >= 1 else vals
+            if base < 1:
+                warnings.append(f"기준 '{anchor}' 검색이 너무 적어 {', '.join(batch)}는 묶음 안 상대값으로 표시")
+            for w in widgets:
+                kw = _widget_keyword(w)
+                if w["id"].startswith("RELATED_QUERIES") and kw in batch and len(related) < cfg.get("related_max", 12):
+                    try:
+                        related[kw] = parse_related(client.widget(w, "relatedsearches"), related_top)
+                    except Exception as e:  # 관련 검색어 실패는 무시
+                        warnings.append(f"'{kw}' 관련 검색어 실패: {e}")
+        except Exception as e:
+            warnings.append(f"{', '.join(batch)} 수집 실패: {e}")
+    rows = summarize_yt_search(raw, anchor, cfg.get("compare_days", 14))
+    for r in rows:
+        r["related"] = related.get(r["name"], [])
+    return {"rows": rows, "anchor": anchor, "timeframe": timeframe, "warnings": warnings}
+
+
 def match_ideas(naver_rows, video_rows, trends) -> list[dict]:
     """검색량이 오르는 키워드 × 실제로 터진 영상 × 오늘 급상승 검색어를 엮어 후보를 만듦"""
     ideas = []
@@ -398,7 +524,8 @@ def match_ideas(naver_rows, video_rows, trends) -> list[dict]:
         if nr["change"] < 15:
             continue
         terms = [nr["name"]] + nr["keywords"]
-        hits = [v for v in video_rows if any(t.replace(" ", "") in v["title"].replace(" ", "") for t in terms)]
+        hits = [v for v in video_rows if (v["ratio"] or 0) >= 3  # 구독자 대비 3배 이상만 "터진 영상"
+                and any(t.replace(" ", "") in v["title"].replace(" ", "") for t in terms)]
         trend_hits = [t["title"] for t in trends
                       if any(term.replace(" ", "") in (t["title"] + " ".join(n.get("title", "") for n in t["news"])).replace(" ", "")
                              for term in terms)]
@@ -407,9 +534,10 @@ def match_ideas(naver_rows, video_rows, trends) -> list[dict]:
     return ideas[:6]
 
 
-def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict) -> str:
+def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict, yts: dict | None = None) -> str:
+    yts = yts or {}
     L = []
-    L.append(f"# 월급실험실 트렌드 리포트 — {now:%Y-%m-%d} ({WEEKDAYS[now.weekday()]})")
+    L.append(f"# 돈케미 트렌드 리포트 — {now:%Y-%m-%d} ({WEEKDAYS[now.weekday()]})")
     L.append("")
     L.append(f"생성 시각: {now:%H:%M} KST · 숫자는 모두 추정치예요.")
     L.append("")
@@ -421,6 +549,10 @@ def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict) ->
         top = [r for r in naver["rows"] if r["change"] >= 15][:3]
         if top:
             summary.append("네이버 검색 상승: " + ", ".join(f"{r['name']}({r['change']:+.0f}%)" for r in top))
+    if yts.get("rows"):
+        up = [r for r in yts["rows"] if r["change"] >= 15][:3]
+        if up:
+            summary.append("유튜브 검색 상승: " + ", ".join(f"{r['name']}({r['change']:+.0f}%)" for r in up))
     if youtube.get("rows"):
         best = [r for r in youtube["rows"] if r["ratio"]][:1]
         if best:
@@ -514,14 +646,31 @@ def render_report(now: dt.datetime, trends: dict, youtube: dict, naver: dict) ->
             L.append(f"| {r['name']} | {signal(r['change'])}{peak} | {r['change']:+.0f}% | {level} | {r['spark']} |")
     L.append("")
 
-    warnings = trends.get("warnings", []) + youtube.get("warnings", []) + naver.get("warnings", [])
+    # 4. 유튜브 검색
+    L.append("## 4. 유튜브 검색 추이 (구글 트렌드 'YouTube 검색')")
+    if yts.get("skipped"):
+        L.append(f"> 건너뜀: {yts['skipped']}")
+    elif yts.get("rows"):
+        L.append(f"기간 {yts.get('timeframe')} · 변화율 = 최근 2주 vs 그 전 2주 · 기준 대비 = '{yts.get('anchor')}' 평균을 100으로 볼 때 · "
+                 "유튜브에서 실제로 검색하는 양이라 네이버와 다를 수 있어요")
+        L.append("")
+        L.append("| 키워드 | 신호 | 변화율 | 기준 대비 | 추이(최근 4주) | 유튜브에서 같이 급상승한 검색어 |")
+        L.append("|---|---|---|---|---|---|")
+        for r in yts["rows"]:
+            L.append(f"| {r['name']} | {signal(r['change'])} | {r['change']:+.0f}% | {r['level']:.0f} | {r['spark']} | "
+                     f"{md_escape(', '.join(r['related'])) or '-'} |")
+    else:
+        L.append("> 데이터가 없어요(구글 트렌드가 막았을 수 있어요). 필요하면 trends.google.com에서 'YouTube 검색'으로 직접 확인.")
+    L.append("")
+
+    warnings = trends.get("warnings", []) + youtube.get("warnings", []) + naver.get("warnings", []) + yts.get("warnings", [])
     if warnings:
         L.append("## 경고")
         L.extend(f"- {md_escape(w)}" for w in warnings)
         L.append("")
 
     L.append("---")
-    L.append("데이터: Google Trends 급상승 RSS · YouTube Data API v3 · NAVER API HUB 검색어 트렌드")
+    L.append("데이터: Google Trends 급상승 RSS · YouTube Data API v3 · NAVER API HUB 검색어 트렌드 · Google Trends YouTube 검색")
     return "\n".join(L) + "\n"
 
 
@@ -563,7 +712,17 @@ def run(config_path: str, out_dir: str | None = None, now: dt.datetime | None = 
     naver["anchor"] = ncfg.get("anchor", {}).get("name", "")
     naver["compare_days"] = ncfg.get("compare_days", 14)
 
-    report = render_report(now, trends, youtube, naver)
+    # 4. 유튜브 검색 (구글 트렌드 YouTube 검색)
+    scfg = cfg.get("youtube_search", {})
+    if scfg.get("enabled", True) and scfg.get("keywords"):
+        try:
+            yts = collect_yt_search(scfg)
+        except Exception as e:
+            yts = {"skipped": f"오류 — {e}", "warnings": []}
+    else:
+        yts = {"skipped": "config.yaml에 youtube_search 키워드가 없어요.", "warnings": []}
+
+    report = render_report(now, trends, youtube, naver, yts)
     out = Path(out_dir or cfg.get("report", {}).get("out_dir", "reports"))
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{now:%Y-%m-%d}.md"
@@ -573,7 +732,7 @@ def run(config_path: str, out_dir: str | None = None, now: dt.datetime | None = 
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="월급실험실 트렌드 리포트")
+    p = argparse.ArgumentParser(description="돈케미 트렌드 리포트")
     p.add_argument("--config", default=str(Path(__file__).with_name("config.yaml")))
     p.add_argument("--out-dir", default=None)
     args = p.parse_args(argv)
